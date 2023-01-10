@@ -1,0 +1,357 @@
+# Instance creation using terraform
+Hey folks, today I'm planning to implement a simple code to install instances using terraform.
+#### Terraform benefits
+- Orchestration, not merely configuration
+- Immutable infrastructure
+- Declarative, not procedural code
+- Client-only architecture
+- Portability
+- Automation
+- Reliability
+- Clearly mapped resource dependencies
+
+#### About this project
+We are going to install/create three instances as one server will be an ssh server in public subnet, one more server in public subnet for hosting wesites and other one in private subnet with database so no outsiders casn access it. We will use prefix list here to give access from particular IP address to the SSH server. 
+
+###### AWS resources used in this project are
+- Prefix list
+- security group for bastion,frontend and beckend server
+- AWS instance
+
+###### Prerequisite
+- IAM user with Programmatic access to AWS with AmazonEc2FullAccess 
+- It is desirable to have Terraform v1.3.6 and Terraform AWS provider version 4.48.0
+
+#### Step 1
+What I do first is, create a project directory and create the following files for the installation provider.tf, variables.tf , outputs.tf , datasource.tf and main.tf
+
+NB: It is not neccesory to create the files with the same name that I have created. You may create a single file with .tf extenstion and run the installation.
+
+#### Step 2
+Configure provider.tf file with the access key and secretkey for the IAM user 
+
+```sh
+provider "aws" {
+ 
+  region     = var.region
+  access_key = var.access_key
+  secret_key = var.secret_key
+}
+```
+#### Step3
+Creating the variables needed for this project in the variable.tf file
+```sh
+
+variable "project" {
+  default = "zomato"
+}
+ 
+variable "environment" {
+  default = "production"
+}
+ 
+variable "region" {
+  default = "ap-south-1"
+}
+variable "instance_ami" {
+  default = "ami-0cca134ec43cf708f"
+}
+ 
+ 
+variable "instance_type" {
+  default = "t2.micro"
+}
+variable "access_key" {
+ 
+  default     = "XXXXXXXXXXXXXXX" /*==your access key here==*/
+  description = "project access_key"
+}
+ 
+variable "secret_key" {
+ 
+  default     = "XXXXXXXXXXXX" /*==Your secret key here==*/
+  description = "project secret_key"
+}
+/*==variables used to declare the prefix_list here you can add the public IP that need access to the SSH server==*/
+
+variable "my_public_ips" {
+  type = list(string)
+  default = [
+    "45.115.91.212/32",
+    "1.1.1.1/32",
+    "2.2.2.2/32",
+    "3.3.3.3/32",
+    "4.4.4.4/32",
+    "5.5.5.5/32"
+  ]
+}
+
+/*== by changing the value to true you can acces the webserver publicaly==*/
+
+variable "public_ssh_to_frontend" {
+  default = false
+}
+
+/*== by changing the value to true you can accees the server anywhere from the public ==*/
+
+variable "public_ssh_to_backend" {
+  default = false
+}
+ 
+/*==here declares the ports for the instances ==*/
+
+variable "database_sg_port" {
+  type    = number
+  default = 3306
+}
+ 
+variable "bastion_sg_port" {
+  type    = number
+  default = 22
+}
+ 
+variable "frontend_sg_ports" {
+  type    = list(string)
+  default = ["80", "443", "8080"]
+}
+```
+#### Step 4
+Creating the main.tf file with the code to create the instances and security groups. 
+
+```sh
+resource "aws_ec2_managed_prefix_list" "public-prefics-list" {
+ 
+  name           = "${var.project}-${var.environment}-prefixlist"
+  address_family = "IPv4"
+  max_entries    = length(var.my_public_ips)
+ 
+  dynamic "entry" {
+ 
+    for_each = var.my_public_ips
+    iterator = ip
+ 
+    content {
+      cidr = ip.value
+    }
+  }
+ 
+  tags = {
+    Name = "${var.project}-${var.environment}-prefixlist-list"
+  }
+}
+ 
+resource "aws_security_group" "bastion_sg" {
+ 
+  name_prefix = "${var.project}-${var.environment}-bastion-"
+  description = "allows ssh traffic from prefix list"
+ 
+ 
+  ingress {
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    prefix_list_ids = [aws_ec2_managed_prefix_list.public-prefics-list.id]
+  }
+ 
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+ 
+  tags = {
+ 
+    "Name" = "${var.project}-${var.environment}-bastion"
+ 
+  }
+}
+resource "aws_security_group" "frontend_sg" {
+ 
+  name_prefix = "${var.project}-${var.environment}-frontend-"
+  description = "allow ssh & frontend_public_ports traffic"
+ 
+  dynamic "ingress" {
+    for_each = toset(var.frontend_sg_ports)
+    iterator = port
+    content {
+      from_port        = port.value
+      to_port          = port.value
+      protocol         = "tcp"
+      cidr_blocks      = ["0.0.0.0/0"]
+      ipv6_cidr_blocks = ["::/0"]
+    }
+  }
+  ingress {
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    cidr_blocks     = var.public_ssh_to_frontend == true ? ["0.0.0.0/0"] : null
+    security_groups = [aws_security_group.bastion_sg.id]
+  }
+ 
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+ 
+  tags = {
+ 
+    "Name" = "${var.project}-${var.environment}-frontend"
+ 
+  }
+}
+ 
+resource "aws_security_group" "backend_sg" {
+ 
+  name_prefix = "${var.project}-${var.environment}-backend-"
+  description = "allow ssh & mysql traffic"
+ 
+ 
+ 
+  ingress {
+ 
+    from_port       = var.database_sg_port
+    to_port         = var.database_sg_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.frontend_sg.id]
+  }
+ 
+  ingress {
+    from_port       = var.bastion_sg_port
+    to_port         = var.bastion_sg_port
+    protocol        = "tcp"
+    cidr_blocks     = var.public_ssh_to_backend == true ? ["0.0.0.0/0"] : null
+    security_groups = [aws_security_group.bastion_sg.id]
+  }
+ 
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+ 
+  tags = {
+    "Name" = "${var.project}-${var.environment}-backend"
+  }
+}
+ 
+resource "aws_instance" "bastion" {
+ 
+  ami                    = var.instance_ami
+  instance_type          = var.instance_type
+  key_name               = "Devops"
+  user_data              = file("${path.module}/bastion.sh")
+  vpc_security_group_ids = [aws_security_group.bastion_sg.id]
+  tags = {
+    "Name" = "${var.project}-${var.environment}-bastion"
+  }
+}
+ 
+resource "aws_instance" "frontend" {
+ 
+  ami                    = var.instance_ami
+  instance_type          = var.instance_type
+  key_name               = "Devops"
+  user_data              = file("${path.module}/frontend.sh")
+  vpc_security_group_ids = [aws_security_group.frontend_sg.id]
+  tags = {
+    "Name" = "${var.project}-${var.environment}-frontend"
+  }
+}
+ 
+resource "aws_instance" "backend" {
+ 
+  ami                    = var.instance_ami
+  instance_type          = var.instance_type
+  key_name               = "Devops"
+  user_data              = file("${path.module}/backend.sh")
+  vpc_security_group_ids = [aws_security_group.backend_sg.id]
+  tags = {
+    "Name" = "${var.project}-${var.environment}-backend"
+  }
+}
+```
+#### Step 5
+Creating userdata files for the three instances Create these three seprate files under your project directory. These are simple userdata with timeout interwell and frontend server will print the server hostname and display frontend server. 
+
+```sh
+#######Contents of frontend.sh
+#!/bin/bash
+ 
+ 
+echo "ClientAliveInterval 60" >> /etc/ssh/sshd_config
+echo "LANG=en_US.utf-8" >> /etc/environment
+echo "LC_ALL=en_US.utf-8" >> /etc/environment
+service sshd restart
+ 
+ 
+yum install httpd php -y
+ 
+cat <<EOF > /var/www/html/index.php
+<?php
+\$output = shell_exec('echo $HOSTNAME');
+echo "<h1><center><pre>\$output</pre></center></h1>";
+echo "<h1><center>Frontend server</center></h1>"
+?>
+EOF
+ 
+service httpd restart
+ 
+==========================================================
+########### Contents of backend.sh
+cat backend.sh 
+#!/bin/bash
+ 
+ 
+echo "ClientAliveInterval 60" >> /etc/ssh/sshd_config
+echo "LANG=en_US.utf-8" >> /etc/environment
+echo "LC_ALL=en_US.utf-8" >> /etc/environment
+===========================================================
+
+######## Contents of bastion.sh
+echo "ClientAliveInterval 60" >> /etc/ssh/sshd_config
+echo "LANG=en_US.utf-8" >> /etc/environment
+echo "LC_ALL=en_US.utf-8" >> /etc/environment
+````
+
+#### Step 6
+Creating an output.tf file to print the output of ssh commands and the URL to access the website on frontend server
+```sh
+output "urls" {
+  value = "bastion ssh -A ec2-user@${aws_instance.bastion.public_ip}  backend ssh -A ec2-user@${aws_instance.backend.public_ip} ssh -A ec2-user@${aws_instance.backend.private_ip}  frontend  http://${aws_instance.frontend.public_ip} ssh -A ec2-user@${aws_instance.frontend.private_ip} ssh -A ec2-user@${aws_instance.frontend.public_ip}"
+}
+```
+#### Step 7
+
+Installastion of terraform file/provider file is done using the following command
+```sh
+terraform init
+```
+
+#### Step 8
+Use the below command to check the codes and any corrections on it
+```sh
+terraform validate
+```
+
+#### Step 9
+To check what are the resources going to build use the command below
+
+```sh
+terraform plan
+```
+
+#### Step 10
+If you havent got any errors during the plan then you can start installing using the below command
+
+```sh
+terraform apply
+```
+
